@@ -1,6 +1,6 @@
 # Logitech Unifying
 
-An [Omarchy](https://omarchy.org) shell plugin that shows the devices paired to your Logitech Unifying receiver right in the bar, and lets you pair or unpair them without needing Solaar or any other companion app.
+An [Omarchy](https://omarchy.org) shell plugin that shows the devices paired to Logitech Unifying and Bolt receivers right in the bar, and lets you pair or unpair Unifying devices without needing Solaar or any other companion app.
 
 Click the icon to see connected devices, their kind, and battery level. Put the receiver into pairing mode and unpair devices you no longer use — all from the panel.
 
@@ -24,7 +24,18 @@ Talking to the receiver requires read/write access to its `hidraw` device node, 
 
 ## Dependencies
 
-No external dependencies. Everything needed to talk to the receiver is built in.
+The HID++ helper is self-contained, but the plugin relies on the system's
+`udevadm`, `pkexec`, Python 3, and access to the receiver's `hidraw` device.
+Pairing controls are currently available for Unifying receivers; Bolt devices
+are listed and can be unpaired, but Bolt discovery/pairing is not exposed by
+the panel yet.
+
+If more than one supported receiver is connected, use the receiver selector in
+the panel header to inspect each one.
+
+The **Fix permissions** action rewrites a dedicated udev rule and re-enumerates
+hidraw devices. This can briefly interrupt input from Logitech receivers, so
+run it only when the permission error is present.
 
 ## Credit where credit is due
 

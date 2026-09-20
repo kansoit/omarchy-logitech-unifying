@@ -3,7 +3,10 @@ function parseReceivers(text) {
   try {
     var parsed = JSON.parse(text)
     if (!Array.isArray(parsed)) return []
-    return parsed.filter(function(r) { return r && r.kind === "unifying" })
+    // Keep both receiver families reported by the helper. Bolt pairing is
+    // intentionally disabled in the current panel, but Bolt devices should
+    // still be visible instead of being silently discarded.
+    return parsed.filter(function(r) { return r && (r.kind === "unifying" || r.kind === "bolt") })
   } catch (e) {
     return []
   }

@@ -165,12 +165,16 @@ def _request(fd, subid, register, params=b"", timeout=1.0, devnumber=RECEIVER_DE
         payload = _read_one(fd, remaining)
         if payload is None:
             raise HidppTimeout(f"timeout on subid=0x{subid:02x} register=0x{register:02x}")
+        if len(payload) < 4:
+            continue
         reply_devnumber = payload[1]
         reply_subid = payload[2]
         reply_register = payload[3]
         if reply_devnumber != devnumber:
             continue  # unrelated reply/notification for another device
         if reply_subid == SUBID_ERROR and reply_register == subid:
+            if len(payload) < 6:
+                continue
             err_register = payload[4]
             err_code = payload[5] if len(payload) > 5 else 0
             if err_register == register:
@@ -238,9 +242,11 @@ def _device_online_once(fd, devnumber, timeout):
         payload = _read_one(fd, remaining)
         if payload is None:
             return False
+        if len(payload) < 4:
+            continue
         if payload[1] != devnumber:
             continue
-        if payload[2] == SUBID_ERROR and payload[3] == 0x00 and payload[4] == 0x10:
+        if payload[2] == SUBID_ERROR and len(payload) >= 5 and payload[3] == 0x00 and payload[4] == 0x10:
             err_code = payload[5] if len(payload) > 5 else 0
             if err_code == ERR_INVALID_SUB_ID_COMMAND:
                 return True  # HID++1.0 device, but present
@@ -301,6 +307,8 @@ def _device_battery_once(fd, devnumber, timeout):
     if idx:
         try:
             reply = _request(fd, idx, 0x10, b"", timeout, devnumber)
+            if len(reply) < 3:
+                raise HidppError("short unified-battery response")
             discharge, level, status_code = reply[0], reply[1], reply[2]
             # 0=discharging 1=charging 2=charging slowly 3=full 4=error
             status = {0: "discharging", 1: "recharging", 2: "recharging", 3: "full"}.get(status_code)
@@ -320,20 +328,24 @@ def _device_battery_once(fd, devnumber, timeout):
             # 0=discharging 1=recharging 2=almost full 3=full 4=slow
             # recharge 5=invalid battery 6=thermal error 7=other error
             status = {0: "discharging", 1: "recharging", 2: "recharging", 3: "full", 4: "recharging"}.get(status_code)
-            if reply[0]:
+            if len(reply) > 0 and reply[0]:
                 return reply[0], status
         except (HidppError, HidppTimeout):
             pass
 
     try:
         reply = get_register(fd, 0x0D, timeout=timeout, devnumber=devnumber)  # BATTERY_CHARGE
-        if reply[0]:
+        if not reply:
+            raise HidppError("empty battery-charge response")
+        if len(reply) > 0 and reply[0]:
             return reply[0], None
     except (HidppError, HidppTimeout):
         pass
 
     try:
         reply = get_register(fd, 0x07, timeout=timeout, devnumber=devnumber)  # BATTERY_STATUS (legacy)
+        if len(reply) < 2:
+            raise HidppError("short legacy-battery response")
         status_byte, charging_byte = reply[0], reply[1]
         pct = {7: 100, 5: 70, 3: 40, 1: 10}.get(status_byte)
         status = None
@@ -379,6 +391,8 @@ def open_working_hidraw(candidates):
 # ------------------------------------------------------------- pairing info
 
 def _codename(reply):
+    if len(reply) < 2:
+        return ""
     length = min(reply[1], len(reply) - 2)
     return reply[2 : 2 + length].decode("ascii", errors="replace")
 
@@ -395,6 +409,8 @@ def _looks_like_name(name):
 
 def unifying_slot(fd, n):
     pair_info = get_long_register(fd, REG_RECEIVER_INFO, bytes([0x20 + n - 1]))
+    if len(pair_info) < 8:
+        raise HidppError("short receiver slot response")
     wpid = pair_info[3:5].hex()
     if wpid == "0000":
         return None
@@ -421,11 +437,15 @@ def unifying_slot(fd, n):
 
 def bolt_slot(fd, n):
     pair_info = get_long_register(fd, REG_RECEIVER_INFO, bytes([0x50 + n]))
+    if len(pair_info) < 8:
+        raise HidppError("short Bolt slot response")
     wpid = (pair_info[3:4] + pair_info[2:3]).hex()
     if wpid == "0000":
         return None
     kind_byte = pair_info[1] & 0x0F
     name_reply = get_long_register(fd, REG_RECEIVER_INFO, bytes([0x60 + n, 0x01]))
+    if len(name_reply) < 3:
+        raise HidppError("short Bolt device-name response")
     length = min(14, name_reply[2])
     name = name_reply[3 : 3 + length].decode("ascii", errors="replace")
     return {
@@ -453,7 +473,7 @@ def list_receivers():
             for n in range(1, MAX_SLOTS + 1):
                 try:
                     slot = unifying_slot(fd, n) if group["kind"] == "unifying" else bolt_slot(fd, n)
-                except (HidppError, HidppTimeout):
+                except (HidppError, HidppTimeout, IndexError, ValueError):
                     slot = None
                 if slot is None:
                     continue

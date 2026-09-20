@@ -13,13 +13,26 @@ Panel {
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
-  readonly property string helperPath: Quickshell.env("HOME") + "/.config/omarchy/plugins/axelfontaine.logitech-unifying/bin/hidpp-receiver"
-  readonly property string fixPermsPath: Quickshell.env("HOME") + "/.config/omarchy/plugins/axelfontaine.logitech-unifying/bin/fix-udev-permissions"
+  function bundledPath(name) {
+    return decodeURIComponent(String(Qt.resolvedUrl(name)).replace(/^file:\/\//, ""))
+  }
+
+  readonly property string helperPath: bundledPath("bin/hidpp-receiver")
+  readonly property string fixPermsPath: bundledPath("bin/fix-udev-permissions")
   property bool fixingPermissions: false
+  property string actionKind: ""
+  property string actionError: ""
+  property string actionNotice: ""
 
   property var receivers: []
-  readonly property var receiver: receivers.length > 0 ? receivers[0] : null
+  property int receiverIndex: 0
+  readonly property var receiver: receivers.length > 0 ? receivers[Math.min(receiverIndex, receivers.length - 1)] : null
   readonly property bool anyReceiver: receiver !== null
+
+  onReceiversChanged: {
+    if (receivers.length === 0) receiverIndex = 0
+    else if (receiverIndex >= receivers.length) receiverIndex = receivers.length - 1
+  }
 
   // Hide the bar icon entirely when no Unifying receiver is detected,
   // rather than just dimming it.
@@ -57,6 +70,16 @@ Panel {
 
   function refresh() {
     if (!listProc.running) listProc.running = true
+  }
+
+  function runHelper(args, kind) {
+    if (actionProc.running) return false
+    actionKind = kind
+    actionError = ""
+    actionNotice = ""
+    actionProc.command = [root.helperPath].concat(args)
+    actionProc.running = true
+    return true
   }
 
   function fixPermissions() {
@@ -113,22 +136,16 @@ Panel {
   }
 
   function startPairing() {
-    if (!root.receiver) return
-    root.isPairing = true
-    root.pairingSecondsLeft = 30
+    if (!root.receiver || root.receiver.kind !== "unifying") return
     root.pairingStartDeviceCount = (root.receiver.devices || []).length
-    Quickshell.execDetached([root.helperPath, "pair-start", root.receiver.id, "--timeout", "30"])
-    pairingCountdown.restart()
+    if (root.runHelper(["pair-start", root.receiver.id, "--timeout", "30"], "pair-start"))
+      root.actionNotice = "Starting pairing…"
   }
 
   function stopPairing() {
     if (!root.isPairing || !root.receiver) return
-    Quickshell.execDetached([root.helperPath, "pair-stop", root.receiver.id])
-    root.isPairing = false
-    root.pairingSecondsLeft = 0
-    root.pairingStartDeviceCount = -1
-    pairingCountdown.stop()
-    refreshSoon.restart()
+    if (root.runHelper(["pair-stop", root.receiver.id], "pair-stop"))
+      root.actionNotice = "Stopping pairing…"
   }
 
   // Called whenever a fresh `list` result comes in. If the receiver now has
@@ -149,8 +166,7 @@ Panel {
     var pending = root.pendingUnpair
     root.pendingUnpair = null
     if (!pending || !root.receiver) return
-    Quickshell.execDetached([root.helperPath, "unpair", root.receiver.id, String(pending.slot)])
-    refreshSoon.restart()
+    root.runHelper(["unpair", root.receiver.id, String(pending.slot)], "unpair")
   }
 
   onOpenedChanged: {
@@ -194,6 +210,40 @@ Panel {
         // nav pointed at nothing.
         var deviceCount = (root.receiver && root.receiver.devices) ? root.receiver.devices.length : 0
         if (root.selectedIndex >= deviceCount) root.selectedIndex = deviceCount - 1
+      }
+    }
+  }
+
+  Process {
+    id: actionProc
+    stdout: StdioCollector { waitForEnd: true }
+    stderr: StdioCollector { waitForEnd: true }
+    onExited: function(exitCode) {
+      var kind = root.actionKind
+      var errorText = String(actionProc.stderr.text || "").trim()
+      root.actionKind = ""
+      if (exitCode !== 0) {
+        root.actionError = errorText || "The Logitech receiver operation failed."
+        root.actionNotice = ""
+        if (kind === "pair-start") root.pairingStartDeviceCount = -1
+        return
+      }
+      root.actionError = ""
+      if (kind === "pair-start") {
+        root.isPairing = true
+        root.pairingSecondsLeft = 30
+        root.actionNotice = "Pairing active"
+        pairingCountdown.restart()
+      } else if (kind === "pair-stop") {
+        root.isPairing = false
+        root.pairingSecondsLeft = 0
+        root.pairingStartDeviceCount = -1
+        pairingCountdown.stop()
+        root.actionNotice = "Pairing stopped"
+        refreshSoon.restart()
+      } else if (kind === "unpair") {
+        root.actionNotice = "Device unpaired"
+        refreshSoon.restart()
       }
     }
   }
@@ -337,6 +387,7 @@ Panel {
         Item {
           width: parent.width
           implicitHeight: Math.max(titleRow.implicitHeight, pairBtn.implicitHeight)
+            + (receiverSelector.visible ? receiverSelector.implicitHeight + Style.space(6) : 0)
 
           Row {
             id: titleRow
@@ -353,11 +404,33 @@ Panel {
             Text {
               textFormat: Text.PlainText
               anchors.verticalCenter: parent.verticalCenter
-              text: "Logitech Unifying Receiver"
+              text: "Logitech " + (root.receiver ? Model.kindLabel(root.receiver.kind) : "") + " Receiver"
               color: root.bar.foreground
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.title
               font.bold: true
+            }
+          }
+
+          Row {
+            id: receiverSelector
+            visible: root.receivers.length > 1
+            anchors.left: parent.left
+            anchors.top: titleRow.bottom
+            anchors.topMargin: Style.space(6)
+            spacing: Style.space(4)
+
+            Repeater {
+              model: root.receivers
+              delegate: Button {
+                required property var modelData
+                required property int index
+                text: modelData.kind.toUpperCase() + " " + (index + 1)
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                bordered: index === root.receiverIndex
+                onClicked: root.receiverIndex = index
+              }
             }
           }
 
@@ -368,9 +441,10 @@ Panel {
             bordered: true
             foreground: root.bar.foreground
             fontFamily: root.bar.fontFamily
+            enabled: root.receiver && root.receiver.kind === "unifying" && !actionProc.running
             iconText: root.isPairing ? "" : "󰐕"
-            text: root.isPairing ? ("Stop (" + root.pairingSecondsLeft + "s)") : ""
-            tooltipText: root.isPairing ? "" : "Pair new device"
+            text: root.isPairing ? ("Stop (" + root.pairingSecondsLeft + "s)") : (root.receiver && root.receiver.kind === "bolt" ? "Bolt pairing unavailable" : "")
+            tooltipText: root.isPairing ? "" : (root.receiver && root.receiver.kind === "bolt" ? "Bolt pairing is not supported by this panel" : "Pair new device")
             hasCursor: root.headerHasCursor
             onHovered: function(isHovered) { if (isHovered) root.setHeaderCursor() }
             onClicked: root.isPairing ? root.stopPairing() : root.startPairing()
@@ -378,6 +452,27 @@ Panel {
         }
 
         PanelSeparator { foreground: root.bar.foreground }
+
+        Text {
+          visible: root.actionError !== ""
+          textFormat: Text.PlainText
+          text: root.actionError
+          color: Color.urgent
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
+          width: parent.width
+        }
+
+        Text {
+          visible: root.actionNotice !== ""
+          textFormat: Text.PlainText
+          text: root.actionNotice
+          color: Qt.darker(root.bar.foreground, 1.35)
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
+          width: parent.width
+        }
 
         Text {
           visible: root.isPairing
