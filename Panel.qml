@@ -25,16 +25,31 @@ Panel {
   property string actionNotice: ""
 
   property var receivers: []
-  property int receiverIndex: 0
-  readonly property var receiver: receivers.length > 0 ? receivers[Math.min(receiverIndex, receivers.length - 1)] : null
+  // The selected receiver is tracked by id, not by list position: a hotplug
+  // can reorder the list, and an action must never land on another receiver.
+  property string receiverId: ""
+  readonly property var receiver: findReceiver(receiverId) || (receivers.length > 0 ? receivers[0] : null)
   readonly property bool anyReceiver: receiver !== null
+  // The receiver whose pairing lock is open, kept apart from the selection.
+  property string pairingReceiverId: ""
 
-  onReceiversChanged: {
-    if (receivers.length === 0) receiverIndex = 0
-    else if (receiverIndex >= receivers.length) receiverIndex = receivers.length - 1
+  function findReceiver(id) {
+    if (!id) return null
+    for (var i = 0; i < receivers.length; i++) {
+      if (receivers[i] && receivers[i].id === id) return receivers[i]
+    }
+    return null
   }
 
-  // Hide the bar icon entirely when no Unifying receiver is detected,
+  function selectReceiver(id) {
+    if (id === root.receiverId || root.isPairing || actionProc.running) return
+    root.receiverId = id
+    root.pendingUnpair = null
+    root.actionFocused = false
+    root.selectedIndex = -1
+  }
+
+  // Hide the bar icon entirely when no supported receiver is detected,
   // rather than just dimming it.
   visible: anyReceiver
   // ...and close the popout too, if it happened to be open when the
@@ -138,13 +153,17 @@ Panel {
   function startPairing() {
     if (!root.receiver || root.receiver.kind !== "unifying") return
     root.pairingStartDeviceCount = (root.receiver.devices || []).length
-    if (root.runHelper(["pair-start", root.receiver.id, "--timeout", "30"], "pair-start"))
+    // Pin the selection too, so a receiver plugged in meanwhile cannot take
+    // over the panel (and its Stop button) while this lock is open.
+    root.receiverId = root.receiver.id
+    root.pairingReceiverId = root.receiver.id
+    if (root.runHelper(["pair-start", root.pairingReceiverId, "--timeout", "30"], "pair-start"))
       root.actionNotice = "Starting pairing…"
   }
 
   function stopPairing() {
-    if (!root.isPairing || !root.receiver) return
-    if (root.runHelper(["pair-stop", root.receiver.id], "pair-stop"))
+    if (!root.isPairing || !root.pairingReceiverId) return
+    if (root.runHelper(["pair-stop", root.pairingReceiverId], "pair-stop"))
       root.actionNotice = "Stopping pairing…"
   }
 
@@ -153,25 +172,34 @@ Panel {
   // close the lock instead of leaving it open for the rest of the
   // countdown.
   function checkPairingJoined() {
-    if (!root.isPairing || !root.receiver) return
-    if ((root.receiver.devices || []).length > root.pairingStartDeviceCount) root.stopPairing()
+    var pairing = root.findReceiver(root.pairingReceiverId)
+    if (!root.isPairing || !pairing) return
+    if ((pairing.devices || []).length > root.pairingStartDeviceCount) root.stopPairing()
   }
 
   function requestUnpair(device) {
-    if (!device) return
-    root.pendingUnpair = { slot: device.slot, name: device.name }
+    if (!device || !root.receiver) return
+    root.receiverId = root.receiver.id
+    root.pendingUnpair = { receiverId: root.receiver.id, slot: device.slot, name: device.name }
   }
 
   function confirmUnpair() {
     var pending = root.pendingUnpair
     root.pendingUnpair = null
-    if (!pending || !root.receiver) return
-    root.runHelper(["unpair", root.receiver.id, String(pending.slot)], "unpair")
+    // Only unpair on the receiver the confirmation was opened for; if it is
+    // gone, the slot number means nothing.
+    if (!pending || !root.findReceiver(pending.receiverId)) return
+    root.runHelper(["unpair", pending.receiverId, String(pending.slot)], "unpair")
   }
 
   onOpenedChanged: {
     if (opened) {
       refresh()
+      // Results of an earlier action are stale once the panel is reopened.
+      if (!actionProc.running) {
+        actionError = ""
+        actionNotice = ""
+      }
       actionFocused = false
       cursorActive = false
       var devices = (root.receiver && root.receiver.devices) ? root.receiver.devices : []
@@ -225,7 +253,18 @@ Panel {
       if (exitCode !== 0) {
         root.actionError = errorText || "The Logitech receiver operation failed."
         root.actionNotice = ""
-        if (kind === "pair-start") root.pairingStartDeviceCount = -1
+        if (kind === "pair-start") {
+          root.pairingStartDeviceCount = -1
+          root.pairingReceiverId = ""
+        } else if (kind === "pair-stop") {
+          // The receiver closes its lock by itself when the timeout it was
+          // given runs out, so stop counting instead of retrying every second.
+          root.isPairing = false
+          root.pairingSecondsLeft = 0
+          root.pairingStartDeviceCount = -1
+          root.pairingReceiverId = ""
+          pairingCountdown.stop()
+        }
         return
       }
       root.actionError = ""
@@ -238,6 +277,7 @@ Panel {
         root.isPairing = false
         root.pairingSecondsLeft = 0
         root.pairingStartDeviceCount = -1
+        root.pairingReceiverId = ""
         pairingCountdown.stop()
         root.actionNotice = "Pairing stopped"
         refreshSoon.restart()
@@ -428,8 +468,9 @@ Panel {
                 text: modelData.kind.toUpperCase() + " " + (index + 1)
                 foreground: root.bar.foreground
                 fontFamily: root.bar.fontFamily
-                bordered: index === root.receiverIndex
-                onClicked: root.receiverIndex = index
+                bordered: modelData.id === root.receiver.id
+                enabled: !root.isPairing && !actionProc.running
+                onClicked: root.selectReceiver(modelData.id)
               }
             }
           }
